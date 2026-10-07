@@ -82,7 +82,11 @@ const [reply, setReply] = useState("");
 
       <section className="chat">
         <div className="chat-title">Ask Ricky AI</div>
-
+{reply && (
+  <div className="chat-reply">
+    {reply}
+  </div>
+)}
         <div className="chat-box">
           <input
             value={message}
