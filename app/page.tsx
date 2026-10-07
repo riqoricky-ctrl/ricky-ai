@@ -5,6 +5,21 @@ import { supabase } from "@/lib/supabase";
 
 export default function Home() {
   const [message, setMessage] = useState("");
+  const [user, setUser] = useState<any>(null);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setUser(data.session?.user ?? null);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
 
   return (
     <main className="dashboard">
@@ -16,9 +31,16 @@ export default function Home() {
 
         <button
   className="profile"
-  onClick={() => (window.location.href = "/login")}
+  onClick={() => {
+    if (user) {
+      supabase.auth.signOut();
+      window.location.reload();
+    } else {
+      window.location.href = "/login";
+    }
+  }}
 >
-  Sign in
+  {user ? "Sign out" : "Sign in"}
 </button>
       </header>
 
