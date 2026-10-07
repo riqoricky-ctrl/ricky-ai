@@ -13,7 +13,12 @@ export default function Home() {
           <div className="tagline">Your personal intelligence layer</div>
         </div>
 
-        <button className="profile">R</button>
+        <button
+  className="profile"
+  onClick={() => (window.location.href = "/login")}
+>
+  Sign in
+</button>
       </header>
 
       <section className="hero">
