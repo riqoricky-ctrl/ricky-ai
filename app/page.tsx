@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 
 export default function Home() {
   const [message, setMessage] = useState("");
+const [reply, setReply] = useState("");
   const [user, setUser] = useState<any>(null);
 
   useEffect(() => {
@@ -89,9 +90,19 @@ export default function Home() {
             placeholder="What are you thinking about?"
           />
 
-          <button onClick={() => setMessage("")}>
-            Send
-          </button>
+          <button
+  onClick={() => {
+    if (!user) {
+      window.location.href = "/login";
+      return;
+    }
+
+    setReply(`Ricky AI received: ${message}`);
+setMessage("");
+  }}
+>
+  Send
+</button>
         </div>
       </section>
     </main>
