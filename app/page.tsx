@@ -38,6 +38,20 @@ export default function Home() {
   const [quantity, setQuantity] = useState("");
   const [threshold, setThreshold] = useState("5");
 
+  const [searchTerm, setSearchTerm] = useState("");
+  const [stockFilter, setStockFilter] = useState("all");
+  const [editingProduct, setEditingProduct] =
+    useState<Product | null>(null);
+
+  const [editName, setEditName] = useState("");
+  const [editSku, setEditSku] = useState("");
+  const [editPrice, setEditPrice] = useState("");
+  const [editQuantity, setEditQuantity] = useState("");
+  const [editThreshold, setEditThreshold] = useState("5");
+
+  const [stockChange, setStockChange] =
+    useState<Record<string, string>>({});
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       setUser(data.session?.user ?? null);
@@ -86,7 +100,9 @@ export default function Home() {
     }
   }
 
-  async function addProduct(event: React.FormEvent<HTMLFormElement>) {
+  async function addProduct(
+    event: React.FormEvent<HTMLFormElement>
+  ) {
     event.preventDefault();
     setError("");
     setNotice("");
@@ -111,7 +127,9 @@ export default function Home() {
       !Number.isInteger(numericThreshold) ||
       numericThreshold < 0
     ) {
-      setError("Enter a product name, valid price, and whole-number stock quantities.");
+      setError(
+        "Enter a product name, valid price, and whole-number stock quantities."
+      );
       return;
     }
 
@@ -139,11 +157,131 @@ export default function Home() {
     setQuantity("");
     setThreshold("5");
     setNotice("Product saved successfully.");
+
     await loadProducts();
   }
 
+  function startEditing(product: Product) {
+    setEditingProduct(product);
+    setEditName(product.name);
+    setEditSku(product.sku ?? "");
+    setEditPrice(String(product.selling_price));
+    setEditQuantity(String(product.quantity));
+    setEditThreshold(String(product.low_stock_threshold));
+    setError("");
+    setNotice("");
+  }
+
+  async function saveProductChanges(
+    event: React.FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+
+    if (!editingProduct) return;
+
+    const numericPrice = Number(editPrice);
+    const numericQuantity = Number(editQuantity);
+    const numericThreshold = Number(editThreshold);
+
+    if (
+      !editName.trim() ||
+      editPrice.trim() === "" ||
+      !Number.isFinite(numericPrice) ||
+      numericPrice < 0 ||
+      editQuantity.trim() === "" ||
+      !Number.isInteger(numericQuantity) ||
+      numericQuantity < 0 ||
+      !Number.isInteger(numericThreshold) ||
+      numericThreshold < 0
+    ) {
+      setError(
+        "Enter valid details and non-negative whole-number stock quantities."
+      );
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setNotice("");
+
+    const { error } = await supabase
+      .from("pos_products")
+      .update({
+        name: editName.trim(),
+        sku: editSku.trim() || null,
+        selling_price: numericPrice,
+        quantity: numericQuantity,
+        low_stock_threshold: numericThreshold,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", editingProduct.id);
+
+    setSaving(false);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setEditingProduct(null);
+    setNotice("Product updated successfully.");
+    await loadProducts();
+  }
+
+  async function adjustStock(
+    product: Product,
+    direction: number
+  ) {
+    const amountText = stockChange[product.id] ?? "1";
+    const amount = Number(amountText);
+
+    if (!Number.isInteger(amount) || amount <= 0) {
+      setError("Enter a whole number greater than zero.");
+      setNotice("");
+      return;
+    }
+
+    const nextQuantity = product.quantity + direction * amount;
+
+    if (nextQuantity < 0) {
+      setError("Stock cannot go below zero.");
+      setNotice("");
+      return;
+    }
+
+    setError("");
+    setNotice("");
+
+    const { error } = await supabase
+      .from("pos_products")
+      .update({
+        quantity: nextQuantity,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", product.id);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setProducts((current) =>
+      current.map((item) =>
+        item.id === product.id
+          ? { ...item, quantity: nextQuantity }
+          : item
+      )
+    );
+
+    setNotice(`Stock updated for ${product.name}.`);
+  }
+
   async function deleteProduct(product: Product) {
-    if (!window.confirm(`Delete "${product.name}" from inventory?`)) {
+    if (
+      !window.confirm(
+        `Delete "${product.name}" from inventory?`
+      )
+    ) {
       return;
     }
 
@@ -163,8 +301,31 @@ export default function Home() {
     setProducts((current) =>
       current.filter((item) => item.id !== product.id)
     );
+
+    if (editingProduct?.id === product.id) {
+      setEditingProduct(null);
+    }
+
     setNotice("Product deleted.");
   }
+
+  const filteredProducts = products.filter((product) => {
+    const term = searchTerm.trim().toLowerCase();
+
+    const matchesSearch =
+      product.name.toLowerCase().includes(term) ||
+      (product.sku ?? "").toLowerCase().includes(term);
+
+    const isLow =
+      product.quantity <= product.low_stock_threshold;
+
+    const matchesFilter =
+      stockFilter === "all" ||
+      (stockFilter === "low" && isLow) ||
+      (stockFilter === "available" && !isLow);
+
+    return matchesSearch && matchesFilter;
+  });
 
   const money = (value: number) =>
     new Intl.NumberFormat("en-KE", {
@@ -189,7 +350,9 @@ export default function Home() {
           {sections.map((item) => (
             <button
               key={item.name}
-              className={`pos-nav-item ${section === item.name ? "active" : ""}`}
+              className={`pos-nav-item ${
+                section === item.name ? "active" : ""
+              }`}
               onClick={() => setSection(item.name)}
             >
               <span className="pos-nav-icon">{item.icon}</span>
@@ -237,7 +400,7 @@ export default function Home() {
                   <p className="pos-eyebrow">PRODUCT MANAGEMENT</p>
                   <h1>Inventory</h1>
                   <p className="pos-description">
-                    Add products and keep track of available stock.
+                    Add products, edit details, and manage stock.
                   </p>
                 </div>
                 <div className="pos-date-chip">
@@ -247,8 +410,11 @@ export default function Home() {
 
               {!user && (
                 <div className="pos-next-step">
-                  Please sign in to view and manage your inventory.
-                  <button className="pos-primary-button" onClick={handleAuth}>
+                  Please sign in to manage your inventory.
+                  <button
+                    className="pos-primary-button"
+                    onClick={handleAuth}
+                  >
                     Sign in
                   </button>
                 </div>
@@ -262,34 +428,44 @@ export default function Home() {
                       <strong>{products.length}</strong>
                       <p>Registered products</p>
                     </article>
+
                     <article className="pos-stat-card">
                       <div className="pos-stat-top">Units in stock</div>
                       <strong>
-                        {products.reduce((sum, p) => sum + p.quantity, 0)}
+                        {products.reduce(
+                          (sum, p) => sum + p.quantity,
+                          0
+                        )}
                       </strong>
                       <p>Across all products</p>
                     </article>
+
                     <article className="pos-stat-card">
                       <div className="pos-stat-top">Low stock</div>
                       <strong>
-                        {products.filter(
-                          (p) => p.quantity <= p.low_stock_threshold
-                        ).length}
+                        {
+                          products.filter(
+                            (p) =>
+                              p.quantity <= p.low_stock_threshold
+                          ).length
+                        }
                       </strong>
                       <p>Products needing attention</p>
                     </article>
+
                     <article className="pos-stat-card">
                       <div className="pos-stat-top">Stock value</div>
                       <strong>
                         {money(
                           products.reduce(
                             (sum, p) =>
-                              sum + Number(p.selling_price) * p.quantity,
+                              sum +
+                              Number(p.selling_price) * p.quantity,
                             0
                           )
                         )}
                       </strong>
-                      <p>At selling prices, not cost prices</p>
+                      <p>At selling prices</p>
                     </article>
                   </div>
 
@@ -297,11 +473,13 @@ export default function Home() {
                     <section className="pos-inventory-form">
                       <h2>Add a product</h2>
                       <p className="pos-description">
-                        Product information and opening stock
+                        Enter product details and opening stock.
                       </p>
 
                       <form onSubmit={addProduct}>
-                        <label htmlFor="product-name">Product name *</label>
+                        <label htmlFor="product-name">
+                          Product name *
+                        </label>
                         <input
                           id="product-name"
                           value={name}
@@ -310,7 +488,9 @@ export default function Home() {
                           required
                         />
 
-                        <label htmlFor="product-sku">SKU / Product code</label>
+                        <label htmlFor="product-sku">
+                          SKU / Product code
+                        </label>
                         <input
                           id="product-sku"
                           value={sku}
@@ -328,7 +508,6 @@ export default function Home() {
                           step="0.01"
                           value={price}
                           onChange={(e) => setPrice(e.target.value)}
-                          placeholder="e.g. 50"
                           required
                         />
 
@@ -341,8 +520,9 @@ export default function Home() {
                           min="0"
                           step="1"
                           value={quantity}
-                          onChange={(e) => setQuantity(e.target.value)}
-                          placeholder="e.g. 20"
+                          onChange={(e) =>
+                            setQuantity(e.target.value)
+                          }
                           required
                         />
 
@@ -355,7 +535,9 @@ export default function Home() {
                           min="0"
                           step="1"
                           value={threshold}
-                          onChange={(e) => setThreshold(e.target.value)}
+                          onChange={(e) =>
+                            setThreshold(e.target.value)
+                          }
                           required
                         />
 
@@ -373,7 +555,7 @@ export default function Home() {
                       <div className="pos-section-heading">
                         <div>
                           <h2>Product list</h2>
-                          <p>Your saved inventory</p>
+                          <p>Search and manage saved inventory</p>
                         </div>
                         <button
                           className="pos-auth-button"
@@ -385,33 +567,75 @@ export default function Home() {
                       </div>
 
                       {error && (
-                        <div className="pos-message pos-error">{error}</div>
-                      )}
-                      {notice && (
-                        <div className="pos-message pos-success">{notice}</div>
+                        <div className="pos-message pos-error">
+                          {error}
+                        </div>
                       )}
 
+                      {notice && (
+                        <div className="pos-message pos-success">
+                          {notice}
+                        </div>
+                      )}
+
+                      <div className="pos-inventory-controls">
+                        <input
+                          className="pos-search-input"
+                          aria-label="Search products"
+                          placeholder="Search name or SKU..."
+                          value={searchTerm}
+                          onChange={(e) =>
+                            setSearchTerm(e.target.value)
+                          }
+                        />
+
+                        <select
+                          className="pos-filter-select"
+                          aria-label="Filter stock"
+                          value={stockFilter}
+                          onChange={(e) =>
+                            setStockFilter(e.target.value)
+                          }
+                        >
+                          <option value="all">All products</option>
+                          <option value="low">Low stock</option>
+                          <option value="available">
+                            Above low-stock level
+                          </option>
+                        </select>
+                      </div>
+
                       {loading ? (
-                        <p className="pos-empty">Loading products...</p>
+                        <p className="pos-empty">
+                          Loading products...
+                        </p>
                       ) : products.length === 0 ? (
                         <p className="pos-empty">
-                          No products yet. Add your first product using the
-                          form.
+                          No products yet. Add your first product.
+                        </p>
+                      ) : filteredProducts.length === 0 ? (
+                        <p className="pos-empty">
+                          No products match your search or filter.
                         </p>
                       ) : (
                         <div className="pos-product-list">
-                          {products.map((product) => (
+                          {filteredProducts.map((product) => (
                             <article
                               className="pos-product-row"
                               key={product.id}
                             >
-                              <div className="pos-product-symbol">▤</div>
+                              <div className="pos-product-symbol">
+                                ▤
+                              </div>
+
                               <div className="pos-product-info">
                                 <strong>{product.name}</strong>
+
                                 <span>
                                   {product.sku || "No product code"} ·{" "}
-                                  {money(product.selling_price)}
+                                  {money(Number(product.selling_price))}
                                 </span>
+
                                 <span
                                   className={
                                     product.quantity <=
@@ -422,23 +646,197 @@ export default function Home() {
                                 >
                                   {product.quantity} in stock
                                   {product.quantity <=
-                                    product.low_stock_threshold &&
-                                    " · Low stock"}
+                                    product.low_stock_threshold
+                                    ? " · Low stock"
+                                    : ""}
                                 </span>
+
+                                <div className="pos-stock-adjust">
+                                  <label
+                                    htmlFor={`stock-${product.id}`}
+                                  >
+                                    Adjust by
+                                  </label>
+
+                                  <input
+                                    id={`stock-${product.id}`}
+                                    type="number"
+                                    min="1"
+                                    step="1"
+                                    value={
+                                      stockChange[product.id] ?? "1"
+                                    }
+                                    onChange={(e) =>
+                                      setStockChange((current) => ({
+                                        ...current,
+                                        [product.id]: e.target.value,
+                                      }))
+                                    }
+                                  />
+
+                                  <button
+                                    type="button"
+                                    className="pos-stock-button"
+                                    disabled={saving}
+                                    onClick={() =>
+                                      adjustStock(product, -1)
+                                    }
+                                  >
+                                    − Remove
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    className="pos-stock-button"
+                                    disabled={saving}
+                                    onClick={() =>
+                                      adjustStock(product, 1)
+                                    }
+                                  >
+                                    + Add
+                                  </button>
+                                </div>
+
+                                <div className="pos-product-actions">
+                                  <button
+                                    type="button"
+                                    className="pos-edit-button"
+                                    onClick={() =>
+                                      startEditing(product)
+                                    }
+                                  >
+                                    Edit details
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    className="pos-delete-button"
+                                    onClick={() =>
+                                      deleteProduct(product)
+                                    }
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
                               </div>
-                              <button
-                                className="pos-delete-button"
-                                onClick={() => deleteProduct(product)}
-                                aria-label={`Delete ${product.name}`}
-                              >
-                                Delete
-                              </button>
                             </article>
                           ))}
                         </div>
                       )}
                     </section>
                   </div>
+
+                  {editingProduct && (
+                    <section className="pos-edit-panel">
+                      <div className="pos-section-heading">
+                        <div>
+                          <h2>Edit product</h2>
+                          <p>
+                            Updating {editingProduct.name}
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          className="pos-auth-button"
+                          onClick={() => setEditingProduct(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+
+                      <form
+                        className="pos-edit-grid"
+                        onSubmit={saveProductChanges}
+                      >
+                        <div>
+                          <label htmlFor="edit-name">
+                            Product name *
+                          </label>
+                          <input
+                            id="edit-name"
+                            value={editName}
+                            onChange={(e) =>
+                              setEditName(e.target.value)
+                            }
+                            required
+                          />
+                        </div>
+
+                        <div>
+                          <label htmlFor="edit-sku">
+                            SKU / Product code
+                          </label>
+                          <input
+                            id="edit-sku"
+                            value={editSku}
+                            onChange={(e) =>
+                              setEditSku(e.target.value)
+                            }
+                          />
+                        </div>
+
+                        <div>
+                          <label htmlFor="edit-price">
+                            Selling price (KSh) *
+                          </label>
+                          <input
+                            id="edit-price"
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={editPrice}
+                            onChange={(e) =>
+                              setEditPrice(e.target.value)
+                            }
+                            required
+                          />
+                        </div>
+
+                        <div>
+                          <label htmlFor="edit-quantity">
+                            Current quantity *
+                          </label>
+                          <input
+                            id="edit-quantity"
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={editQuantity}
+                            onChange={(e) =>
+                              setEditQuantity(e.target.value)
+                            }
+                            required
+                          />
+                        </div>
+
+                        <div>
+                          <label htmlFor="edit-threshold">
+                            Low-stock alert at
+                          </label>
+                          <input
+                            id="edit-threshold"
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={editThreshold}
+                            onChange={(e) =>
+                              setEditThreshold(e.target.value)
+                            }
+                            required
+                          />
+                        </div>
+
+                        <button
+                          className="pos-primary-button pos-submit"
+                          type="submit"
+                          disabled={saving}
+                        >
+                          {saving ? "Saving..." : "Save changes"}
+                        </button>
+                      </form>
+                    </section>
+                  )}
                 </>
               )}
             </>
@@ -446,12 +844,15 @@ export default function Home() {
             <>
               <div className="pos-welcome-row">
                 <div>
-                  <p className="pos-eyebrow">YOUR BUSINESS WORKSPACE</p>
+                  <p className="pos-eyebrow">
+                    YOUR BUSINESS WORKSPACE
+                  </p>
                   <h1>Business overview</h1>
                   <p className="pos-description">
                     Manage your business from one simple dashboard.
                   </p>
                 </div>
+
                 <div className="pos-date-chip">
                   <span className="pos-status-dot" />
                   POS workspace
@@ -508,7 +909,9 @@ export default function Home() {
                     className="pos-tool-card"
                     onClick={() => setSection(item.name)}
                   >
-                    <span className="pos-tool-icon">{item.icon}</span>
+                    <span className="pos-tool-icon">
+                      {item.icon}
+                    </span>
                     <span className="pos-tool-text">
                       <strong>{item.name}</strong>
                       <span>
@@ -529,8 +932,8 @@ export default function Home() {
               </div>
               <h2>{section}</h2>
               <p>
-                This module is awaiting its implementation. Your inventory
-                is available now.
+                This module is awaiting its implementation. Your
+                inventory is available now.
               </p>
               <button
                 className="pos-primary-button"
