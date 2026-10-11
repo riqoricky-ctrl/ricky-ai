@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { supabase } from "@/lib/supabase";
 
 type Product = {
@@ -28,6 +28,8 @@ type Receipt = {
   payment_method: string;
   created_at: string;
   items: ReceiptItem[];
+  cashReceived?: number;
+  changeDue?: number;
 };
 
 const sections = [
@@ -59,12 +61,14 @@ export default function Home() {
 
   const [cart, setCart] = useState<Record<string, number>>({});
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [cashReceived, setCashReceived] = useState("");
   const [lastReceipt, setLastReceipt] = useState<Receipt | null>(null);
 
   const money = (value: number) =>
     new Intl.NumberFormat("en-KE", {
       style: "currency",
       currency: "KES",
+      maximumFractionDigits: 2,
     }).format(Number(value) || 0);
 
   useEffect(() => {
@@ -85,7 +89,6 @@ export default function Home() {
     if (!user) return;
 
     setLoading(true);
-    setError("");
 
     const { data, error: loadError } = await supabase
       .from("pos_products")
@@ -94,7 +97,6 @@ export default function Home() {
 
     if (loadError) {
       setError(loadError.message);
-      setProducts([]);
     } else {
       setProducts((data ?? []) as Product[]);
     }
@@ -103,10 +105,8 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (user && (section === "Inventory" || section === "New Sale")) {
-      loadProducts();
-    }
-  }, [section, user]);
+    if (user) loadProducts();
+  }, [user]);
 
   async function handleAuth() {
     if (user) {
@@ -117,7 +117,7 @@ export default function Home() {
     }
   }
 
-  async function addProduct(event: React.FormEvent<HTMLFormElement>) {
+  async function addProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setNotice("");
@@ -215,6 +215,11 @@ export default function Home() {
     0
   );
 
+  const receivedAmount =
+    cashReceived.trim() === "" ? 0 : Number(cashReceived);
+
+  const changeDue = receivedAmount - cartTotal;
+
   async function completeSale() {
     if (!user) {
       setError("Please sign in before completing a sale.");
@@ -227,6 +232,20 @@ export default function Home() {
 
     if (items.length === 0) {
       setError("Add products to your cart first.");
+      return;
+    }
+
+    if (
+      paymentMethod === "cash" &&
+      (
+        cashReceived.trim() === "" ||
+        !Number.isFinite(receivedAmount) ||
+        receivedAmount < cartTotal
+      )
+    ) {
+      setError(
+        "Cash received must be equal to or greater than the sale total."
+      );
       return;
     }
 
@@ -264,9 +283,10 @@ export default function Home() {
 
     if (saleError || itemsError || !sale) {
       setCart({});
+      setCashReceived("");
       await loadProducts();
       setError(
-        "The sale was recorded, but the receipt could not be loaded. Please check your Supabase sales tables."
+        "Sale was recorded, but the receipt could not be loaded. Check your sales tables."
       );
       return;
     }
@@ -274,6 +294,12 @@ export default function Home() {
     setLastReceipt({
       ...sale,
       total: Number(sale.total),
+      cashReceived:
+        paymentMethod === "cash" ? receivedAmount : undefined,
+      changeDue:
+        paymentMethod === "cash"
+          ? receivedAmount - Number(sale.total)
+          : undefined,
       items: (saleItems ?? []).map((item: any) => ({
         product_name: item.product_name,
         unit_price: Number(item.unit_price),
@@ -283,6 +309,7 @@ export default function Home() {
     });
 
     setCart({});
+    setCashReceived("");
     setNotice("Sale completed successfully. Stock has been updated.");
     await loadProducts();
   }
@@ -324,9 +351,6 @@ export default function Home() {
             >
               <span className="pos-nav-icon">{item.icon}</span>
               <span>{item.name}</span>
-              {item.name === "New Sale" && (
-                <span className="pos-nav-plus">+</span>
-              )}
             </button>
           ))}
         </nav>
@@ -401,15 +425,17 @@ export default function Home() {
                 <article className="pos-stat-card">
                   <div className="pos-stat-top">Products in stock</div>
                   <strong>{user ? products.length : "—"}</strong>
-                  <p>Sign in and open Inventory to load products</p>
+                  <p>Saved products</p>
                 </article>
+
                 <article className="pos-stat-card">
                   <div className="pos-stat-top">Units available</div>
                   <strong>
                     {products.reduce((sum, item) => sum + item.quantity, 0)}
                   </strong>
-                  <p>Total units in your inventory</p>
+                  <p>Total units in inventory</p>
                 </article>
+
                 <article className="pos-stat-card">
                   <div className="pos-stat-top">Low-stock products</div>
                   <strong>
@@ -420,8 +446,9 @@ export default function Home() {
                       ).length
                     }
                   </strong>
-                  <p>Products at or below their alert level</p>
+                  <p>Products needing attention</p>
                 </article>
+
                 <article className="pos-stat-card">
                   <div className="pos-stat-top">Current cart</div>
                   <strong>{cartCount}</strong>
@@ -487,148 +514,142 @@ export default function Home() {
                   </button>
                 </div>
               ) : (
-                <>
-                  <div className="pos-inventory-layout">
-                    <section className="pos-inventory-form">
-                      <h2>Add a product</h2>
-                      <p className="pos-description">
-                        Enter the product and opening stock.
-                      </p>
+                <div className="pos-inventory-layout">
+                  <section className="pos-inventory-form">
+                    <h2>Add a product</h2>
+                    <p className="pos-description">
+                      Enter the product and opening stock.
+                    </p>
 
-                      <form onSubmit={addProduct}>
-                        <label htmlFor="product-name">Product name *</label>
-                        <input
-                          id="product-name"
-                          value={name}
-                          onChange={(e) => setName(e.target.value)}
-                          placeholder="e.g. Milk"
-                          required
-                        />
-
-                        <label htmlFor="product-sku">SKU / Product code</label>
-                        <input
-                          id="product-sku"
-                          value={sku}
-                          onChange={(e) => setSku(e.target.value)}
-                          placeholder="e.g. MILK001"
-                        />
-
-                        <label htmlFor="product-price">
-                          Selling price (KSh) *
-                        </label>
-                        <input
-                          id="product-price"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={price}
-                          onChange={(e) => setPrice(e.target.value)}
-                          required
-                        />
-
-                        <label htmlFor="product-quantity">
-                          Opening quantity *
-                        </label>
-                        <input
-                          id="product-quantity"
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={quantity}
-                          onChange={(e) => setQuantity(e.target.value)}
-                          required
-                        />
-
-                        <label htmlFor="product-threshold">
-                          Low-stock alert at
-                        </label>
-                        <input
-                          id="product-threshold"
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={threshold}
-                          onChange={(e) => setThreshold(e.target.value)}
-                          required
-                        />
-
-                        <button
-                          className="pos-primary-button pos-submit"
-                          type="submit"
-                          disabled={saving}
-                        >
-                          {saving ? "Saving..." : "Save product"}
-                        </button>
-                      </form>
-                    </section>
-
-                    <section className="pos-inventory-list">
-                      <div className="pos-section-heading">
-                        <div>
-                          <h2>Product list</h2>
-                          <p>Search your saved inventory</p>
-                        </div>
-                        <button
-                          className="pos-auth-button"
-                          onClick={loadProducts}
-                          disabled={loading}
-                        >
-                          {loading ? "Loading..." : "Refresh"}
-                        </button>
-                      </div>
-
+                    <form onSubmit={addProduct}>
+                      <label htmlFor="product-name">Product name *</label>
                       <input
-                        className="pos-search-input"
-                        placeholder="Search name or SKU..."
-                        value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
-                        aria-label="Search inventory"
+                        id="product-name"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="e.g. Milk"
+                        required
                       />
 
-                      {loading ? (
-                        <p className="pos-empty">Loading products...</p>
-                      ) : filteredProducts.length === 0 ? (
-                        <p className="pos-empty">
-                          No matching products found.
-                        </p>
-                      ) : (
-                        <div className="pos-product-list">
-                          {filteredProducts.map((product) => (
-                            <article
-                              className="pos-product-row"
-                              key={product.id}
-                            >
-                              <div className="pos-product-symbol">▤</div>
-                              <div className="pos-product-info">
-                                <strong>{product.name}</strong>
-                                <span>
-                                  {product.sku || "No product code"}
-                                </span>
-                                <span>
-                                  {money(Number(product.selling_price))}
-                                </span>
-                                <span
-                                  className={
-                                    product.quantity <=
-                                    product.low_stock_threshold
-                                      ? "pos-stock-low"
-                                      : "pos-stock-ok"
-                                  }
-                                >
-                                  {product.quantity} in stock
-                                  {product.quantity <=
+                      <label htmlFor="product-sku">SKU / Product code</label>
+                      <input
+                        id="product-sku"
+                        value={sku}
+                        onChange={(e) => setSku(e.target.value)}
+                        placeholder="e.g. MILK001"
+                      />
+
+                      <label htmlFor="product-price">
+                        Selling price (KSh) *
+                      </label>
+                      <input
+                        id="product-price"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={price}
+                        onChange={(e) => setPrice(e.target.value)}
+                        required
+                      />
+
+                      <label htmlFor="product-quantity">
+                        Opening quantity *
+                      </label>
+                      <input
+                        id="product-quantity"
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={quantity}
+                        onChange={(e) => setQuantity(e.target.value)}
+                        required
+                      />
+
+                      <label htmlFor="product-threshold">
+                        Low-stock alert at
+                      </label>
+                      <input
+                        id="product-threshold"
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={threshold}
+                        onChange={(e) => setThreshold(e.target.value)}
+                        required
+                      />
+
+                      <button
+                        className="pos-primary-button pos-submit"
+                        type="submit"
+                        disabled={saving}
+                      >
+                        {saving ? "Saving..." : "Save product"}
+                      </button>
+                    </form>
+                  </section>
+
+                  <section className="pos-inventory-list">
+                    <div className="pos-section-heading">
+                      <div>
+                        <h2>Product list</h2>
+                        <p>Search your saved inventory</p>
+                      </div>
+                      <button
+                        className="pos-auth-button"
+                        onClick={loadProducts}
+                        disabled={loading}
+                      >
+                        {loading ? "Loading..." : "Refresh"}
+                      </button>
+                    </div>
+
+                    <input
+                      className="pos-search-input"
+                      placeholder="Search name or SKU..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      aria-label="Search inventory"
+                    />
+
+                    {loading ? (
+                      <p className="pos-empty">Loading products...</p>
+                    ) : filteredProducts.length === 0 ? (
+                      <p className="pos-empty">No matching products found.</p>
+                    ) : (
+                      <div className="pos-product-list">
+                        {filteredProducts.map((product) => (
+                          <article
+                            className="pos-product-row"
+                            key={product.id}
+                          >
+                            <div className="pos-product-symbol">▤</div>
+                            <div className="pos-product-info">
+                              <strong>{product.name}</strong>
+                              <span>{product.sku || "No product code"}</span>
+                              <span>
+                                {money(Number(product.selling_price))}
+                              </span>
+                              <span
+                                className={
+                                  product.quantity <=
                                   product.low_stock_threshold
-                                    ? " · Low stock"
-                                    : ""}
-                                </span>
-                              </div>
-                            </article>
-                          ))}
-                        </div>
-                      )}
-                    </section>
-                  </div>
-                </>
+                                    ? "pos-stock-low"
+                                    : "pos-stock-ok"
+                                }
+                              >
+                                {product.quantity} in stock
+                                {product.quantity <=
+                                product.low_stock_threshold
+                                  ? " · Low stock"
+                                  : ""}
+                              </span>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </div>
               )}
             </>
           )}
@@ -640,7 +661,7 @@ export default function Home() {
                   <p className="pos-eyebrow">POINT OF SALE</p>
                   <h1>New sale</h1>
                   <p className="pos-description">
-                    Add products, choose payment, and complete checkout.
+                    Add products, enter cash received, and calculate change.
                   </p>
                 </div>
                 <div className="pos-date-chip">
@@ -694,12 +715,31 @@ export default function Home() {
                       ))}
 
                       <div className="pos-section-heading">
-                        <h2>Total paid</h2>
+                        <h2>Total</h2>
                         <h2>{money(lastReceipt.total)}</h2>
                       </div>
+
                       <p className="pos-description">
-                        Payment method: {lastReceipt.payment_method.toUpperCase()}
+                        Payment method:{" "}
+                        {lastReceipt.payment_method.toUpperCase()}
                       </p>
+
+                      {lastReceipt.payment_method === "cash" && (
+                        <>
+                          <div className="pos-section-heading">
+                            <span>Cash received</span>
+                            <strong>
+                              {money(lastReceipt.cashReceived ?? 0)}
+                            </strong>
+                          </div>
+                          <div className="pos-section-heading">
+                            <span>Change given</span>
+                            <strong>
+                              {money(lastReceipt.changeDue ?? 0)}
+                            </strong>
+                          </div>
+                        </>
+                      )}
                     </section>
                   )}
 
@@ -708,7 +748,7 @@ export default function Home() {
                       <div className="pos-section-heading">
                         <div>
                           <h2>Available products</h2>
-                          <p>Products with stock can be added to your sale.</p>
+                          <p>Choose products for this sale.</p>
                         </div>
                         <button
                           className="pos-auth-button"
@@ -741,9 +781,7 @@ export default function Home() {
                                 <div className="pos-product-symbol">▤</div>
                                 <div className="pos-product-info">
                                   <strong>{product.name}</strong>
-                                  <span>
-                                    {product.quantity} in stock
-                                  </span>
+                                  <span>{product.quantity} in stock</span>
                                   <span>
                                     {money(Number(product.selling_price))}
                                   </span>
@@ -793,6 +831,7 @@ export default function Home() {
                                     {money(Number(product.selling_price))} each
                                   </span>
                                 </div>
+
                                 <div className="pos-quantity-controls">
                                   <button
                                     type="button"
@@ -815,6 +854,7 @@ export default function Home() {
                                     +
                                   </button>
                                 </div>
+
                                 <strong>
                                   {money(
                                     Number(product.selling_price) * qty
@@ -838,14 +878,64 @@ export default function Home() {
                         id="payment-method"
                         className="pos-filter-select"
                         value={paymentMethod}
-                        onChange={(e) =>
-                          setPaymentMethod(e.target.value)
-                        }
+                        onChange={(e) => {
+                          setPaymentMethod(e.target.value);
+                          setError("");
+                        }}
                       >
                         <option value="cash">Cash</option>
                         <option value="mpesa">M-Pesa</option>
                         <option value="card">Card</option>
                       </select>
+
+                      {paymentMethod === "cash" && (
+                        <div className="pos-edit-panel">
+                          <label htmlFor="cash-received">
+                            Cash received from customer (KSh)
+                          </label>
+                          <input
+                            id="cash-received"
+                            type="number"
+                            min={cartTotal}
+                            step="0.01"
+                            value={cashReceived}
+                            onChange={(e) => {
+                              setCashReceived(e.target.value);
+                              setError("");
+                            }}
+                            placeholder="Enter amount received"
+                          />
+
+                          <div className="pos-section-heading">
+                            <span>Sale total</span>
+                            <strong>{money(cartTotal)}</strong>
+                          </div>
+
+                          <div className="pos-section-heading">
+                            <span>
+                              {cashReceived.trim() !== "" &&
+                              receivedAmount >= cartTotal
+                                ? "Change to give"
+                                : "Amount still owed"}
+                            </span>
+                            <strong>
+                              {money(
+                                cashReceived.trim() === ""
+                                  ? 0
+                                  : Math.abs(changeDue)
+                              )}
+                            </strong>
+                          </div>
+
+                          {cashReceived.trim() !== "" &&
+                            receivedAmount < cartTotal && (
+                              <p className="pos-stock-low">
+                                Customer needs to pay{" "}
+                                {money(cartTotal - receivedAmount)} more.
+                              </p>
+                            )}
+                        </div>
+                      )}
 
                       <button
                         type="button"
