@@ -4,6 +4,32 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
+type Product = {
+  id: string;
+  user_id?: string;
+  sku: string | null;
+  name: string;
+  selling_price: number;
+  quantity: number;
+  low_stock_threshold: number;
+};
+
+type ReceiptItem = {
+  product_name: string;
+  unit_price: number;
+  quantity: number;
+  line_total: number;
+};
+
+type Receipt = {
+  id: string;
+  receipt_number: string;
+  total: number;
+  payment_method: string;
+  created_at: string;
+  items: ReceiptItem[];
+};
+
 const sections = [
   { name: "Dashboard", icon: "▦" },
   { name: "New Sale", icon: "＋" },
@@ -14,21 +40,13 @@ const sections = [
   { name: "Staff & Access", icon: "♙" },
 ];
 
-type Product = {
-  id: string;
-  sku: string | null;
-  name: string;
-  selling_price: number;
-  quantity: number;
-  low_stock_threshold: number;
-};
-
 export default function Home() {
   const [user, setUser] = useState<any>(null);
   const [section, setSection] = useState("Dashboard");
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -37,20 +55,17 @@ export default function Home() {
   const [price, setPrice] = useState("");
   const [quantity, setQuantity] = useState("");
   const [threshold, setThreshold] = useState("5");
-
   const [searchTerm, setSearchTerm] = useState("");
-  const [stockFilter, setStockFilter] = useState("all");
-  const [editingProduct, setEditingProduct] =
-    useState<Product | null>(null);
 
-  const [editName, setEditName] = useState("");
-  const [editSku, setEditSku] = useState("");
-  const [editPrice, setEditPrice] = useState("");
-  const [editQuantity, setEditQuantity] = useState("");
-  const [editThreshold, setEditThreshold] = useState("5");
+  const [cart, setCart] = useState<Record<string, number>>({});
+  const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [lastReceipt, setLastReceipt] = useState<Receipt | null>(null);
 
-  const [stockChange, setStockChange] =
-    useState<Record<string, string>>({});
+  const money = (value: number) =>
+    new Intl.NumberFormat("en-KE", {
+      style: "currency",
+      currency: "KES",
+    }).format(Number(value) || 0);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -67,16 +82,18 @@ export default function Home() {
   }, []);
 
   async function loadProducts() {
+    if (!user) return;
+
     setLoading(true);
     setError("");
 
-    const { data, error } = await supabase
+    const { data, error: loadError } = await supabase
       .from("pos_products")
       .select("*")
       .order("created_at", { ascending: false });
 
-    if (error) {
-      setError(error.message);
+    if (loadError) {
+      setError(loadError.message);
       setProducts([]);
     } else {
       setProducts((data ?? []) as Product[]);
@@ -86,7 +103,7 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (section === "Inventory" && user) {
+    if (user && (section === "Inventory" || section === "New Sale")) {
       loadProducts();
     }
   }, [section, user]);
@@ -100,15 +117,13 @@ export default function Home() {
     }
   }
 
-  async function addProduct(
-    event: React.FormEvent<HTMLFormElement>
-  ) {
+  async function addProduct(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setNotice("");
 
     if (!user) {
-      setError("Please sign in before adding products.");
+      setError("Please sign in first.");
       return;
     }
 
@@ -127,27 +142,27 @@ export default function Home() {
       !Number.isInteger(numericThreshold) ||
       numericThreshold < 0
     ) {
-      setError(
-        "Enter a product name, valid price, and whole-number stock quantities."
-      );
+      setError("Enter valid product details and whole-number quantities.");
       return;
     }
 
     setSaving(true);
 
-    const { error } = await supabase.from("pos_products").insert({
-      user_id: user.id,
-      name: name.trim(),
-      sku: sku.trim() || null,
-      selling_price: numericPrice,
-      quantity: numericQuantity,
-      low_stock_threshold: numericThreshold,
-    });
+    const { error: saveError } = await supabase
+      .from("pos_products")
+      .insert({
+        user_id: user.id,
+        name: name.trim(),
+        sku: sku.trim() || null,
+        selling_price: numericPrice,
+        quantity: numericQuantity,
+        low_stock_threshold: numericThreshold,
+      });
 
     setSaving(false);
 
-    if (error) {
-      setError(error.message);
+    if (saveError) {
+      setError(saveError.message);
       return;
     }
 
@@ -157,181 +172,129 @@ export default function Home() {
     setQuantity("");
     setThreshold("5");
     setNotice("Product saved successfully.");
-
     await loadProducts();
   }
 
-  function startEditing(product: Product) {
-    setEditingProduct(product);
-    setEditName(product.name);
-    setEditSku(product.sku ?? "");
-    setEditPrice(String(product.selling_price));
-    setEditQuantity(String(product.quantity));
-    setEditThreshold(String(product.low_stock_threshold));
+  function changeCart(productId: string, change: number) {
+    const product = products.find((item) => item.id === productId);
+    if (!product) return;
+
+    setCart((current) => {
+      const nextQuantity = Math.max(
+        0,
+        Math.min(
+          product.quantity,
+          (current[productId] ?? 0) + change
+        )
+      );
+
+      const next = { ...current };
+
+      if (nextQuantity === 0) {
+        delete next[productId];
+      } else {
+        next[productId] = nextQuantity;
+      }
+
+      return next;
+    });
+
     setError("");
-    setNotice("");
   }
 
-  async function saveProductChanges(
-    event: React.FormEvent<HTMLFormElement>
-  ) {
-    event.preventDefault();
+  const cartTotal = Object.entries(cart).reduce(
+    (total, [productId, qty]) => {
+      const product = products.find((item) => item.id === productId);
+      return total + (product ? Number(product.selling_price) * qty : 0);
+    },
+    0
+  );
 
-    if (!editingProduct) return;
+  const cartCount = Object.values(cart).reduce(
+    (total, qty) => total + qty,
+    0
+  );
 
-    const numericPrice = Number(editPrice);
-    const numericQuantity = Number(editQuantity);
-    const numericThreshold = Number(editThreshold);
+  async function completeSale() {
+    if (!user) {
+      setError("Please sign in before completing a sale.");
+      return;
+    }
 
-    if (
-      !editName.trim() ||
-      editPrice.trim() === "" ||
-      !Number.isFinite(numericPrice) ||
-      numericPrice < 0 ||
-      editQuantity.trim() === "" ||
-      !Number.isInteger(numericQuantity) ||
-      numericQuantity < 0 ||
-      !Number.isInteger(numericThreshold) ||
-      numericThreshold < 0
-    ) {
+    const items = Object.entries(cart)
+      .filter(([, qty]) => qty > 0)
+      .map(([product_id, quantity]) => ({ product_id, quantity }));
+
+    if (items.length === 0) {
+      setError("Add products to your cart first.");
+      return;
+    }
+
+    setCheckoutBusy(true);
+    setError("");
+    setNotice("");
+
+    const { data: saleId, error: checkoutError } =
+      await supabase.rpc("pos_checkout", {
+        p_items: items,
+        p_payment_method: paymentMethod,
+      });
+
+    if (checkoutError || !saleId) {
       setError(
-        "Enter valid details and non-negative whole-number stock quantities."
+        checkoutError?.message ?? "Checkout failed. Please try again."
+      );
+      setCheckoutBusy(false);
+      return;
+    }
+
+    const { data: sale, error: saleError } = await supabase
+      .from("pos_sales")
+      .select("id, receipt_number, total, payment_method, created_at")
+      .eq("id", saleId)
+      .single();
+
+    const { data: saleItems, error: itemsError } = await supabase
+      .from("pos_sale_items")
+      .select("product_name, unit_price, quantity, line_total")
+      .eq("sale_id", saleId)
+      .order("created_at", { ascending: true });
+
+    setCheckoutBusy(false);
+
+    if (saleError || itemsError || !sale) {
+      setCart({});
+      await loadProducts();
+      setError(
+        "The sale was recorded, but the receipt could not be loaded. Please check your Supabase sales tables."
       );
       return;
     }
 
-    setSaving(true);
-    setError("");
-    setNotice("");
+    setLastReceipt({
+      ...sale,
+      total: Number(sale.total),
+      items: (saleItems ?? []).map((item: any) => ({
+        product_name: item.product_name,
+        unit_price: Number(item.unit_price),
+        quantity: Number(item.quantity),
+        line_total: Number(item.line_total),
+      })),
+    });
 
-    const { error } = await supabase
-      .from("pos_products")
-      .update({
-        name: editName.trim(),
-        sku: editSku.trim() || null,
-        selling_price: numericPrice,
-        quantity: numericQuantity,
-        low_stock_threshold: numericThreshold,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", editingProduct.id);
-
-    setSaving(false);
-
-    if (error) {
-      setError(error.message);
-      return;
-    }
-
-    setEditingProduct(null);
-    setNotice("Product updated successfully.");
+    setCart({});
+    setNotice("Sale completed successfully. Stock has been updated.");
     await loadProducts();
-  }
-
-  async function adjustStock(
-    product: Product,
-    direction: number
-  ) {
-    const amountText = stockChange[product.id] ?? "1";
-    const amount = Number(amountText);
-
-    if (!Number.isInteger(amount) || amount <= 0) {
-      setError("Enter a whole number greater than zero.");
-      setNotice("");
-      return;
-    }
-
-    const nextQuantity = product.quantity + direction * amount;
-
-    if (nextQuantity < 0) {
-      setError("Stock cannot go below zero.");
-      setNotice("");
-      return;
-    }
-
-    setError("");
-    setNotice("");
-
-    const { error } = await supabase
-      .from("pos_products")
-      .update({
-        quantity: nextQuantity,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", product.id);
-
-    if (error) {
-      setError(error.message);
-      return;
-    }
-
-    setProducts((current) =>
-      current.map((item) =>
-        item.id === product.id
-          ? { ...item, quantity: nextQuantity }
-          : item
-      )
-    );
-
-    setNotice(`Stock updated for ${product.name}.`);
-  }
-
-  async function deleteProduct(product: Product) {
-    if (
-      !window.confirm(
-        `Delete "${product.name}" from inventory?`
-      )
-    ) {
-      return;
-    }
-
-    setError("");
-    setNotice("");
-
-    const { error } = await supabase
-      .from("pos_products")
-      .delete()
-      .eq("id", product.id);
-
-    if (error) {
-      setError(error.message);
-      return;
-    }
-
-    setProducts((current) =>
-      current.filter((item) => item.id !== product.id)
-    );
-
-    if (editingProduct?.id === product.id) {
-      setEditingProduct(null);
-    }
-
-    setNotice("Product deleted.");
   }
 
   const filteredProducts = products.filter((product) => {
     const term = searchTerm.trim().toLowerCase();
 
-    const matchesSearch =
+    return (
       product.name.toLowerCase().includes(term) ||
-      (product.sku ?? "").toLowerCase().includes(term);
-
-    const isLow =
-      product.quantity <= product.low_stock_threshold;
-
-    const matchesFilter =
-      stockFilter === "all" ||
-      (stockFilter === "low" && isLow) ||
-      (stockFilter === "available" && !isLow);
-
-    return matchesSearch && matchesFilter;
+      (product.sku ?? "").toLowerCase().includes(term)
+    );
   });
-
-  const money = (value: number) =>
-    new Intl.NumberFormat("en-KE", {
-      style: "currency",
-      currency: "KES",
-    }).format(Number(value));
 
   return (
     <main className="pos-dashboard">
@@ -353,7 +316,11 @@ export default function Home() {
               className={`pos-nav-item ${
                 section === item.name ? "active" : ""
               }`}
-              onClick={() => setSection(item.name)}
+              onClick={() => {
+                setSection(item.name);
+                setError("");
+                setNotice("");
+              }}
             >
               <span className="pos-nav-icon">{item.icon}</span>
               <span>{item.name}</span>
@@ -393,14 +360,115 @@ export default function Home() {
         </header>
 
         <div className="pos-content">
-          {section === "Inventory" ? (
+          {error && (
+            <div className="pos-message pos-error">{error}</div>
+          )}
+
+          {notice && (
+            <div className="pos-message pos-success">{notice}</div>
+          )}
+
+          {section === "Dashboard" && (
+            <>
+              <div className="pos-welcome-row">
+                <div>
+                  <p className="pos-eyebrow">YOUR BUSINESS WORKSPACE</p>
+                  <h1>Business overview</h1>
+                  <p className="pos-description">
+                    Manage your business from one simple dashboard.
+                  </p>
+                </div>
+                <div className="pos-date-chip">
+                  <span className="pos-status-dot" />
+                  POS workspace
+                </div>
+              </div>
+
+              <div className="pos-summary-banner">
+                <div>
+                  <span className="pos-banner-label">
+                    RICKY POS · OVERVIEW
+                  </span>
+                  <h2>Run your business with clarity.</h2>
+                  <p>
+                    Track sales, manage stock, and organise daily operations.
+                  </p>
+                </div>
+                <div className="pos-banner-symbol">R</div>
+              </div>
+
+              <div className="pos-stats-grid">
+                <article className="pos-stat-card">
+                  <div className="pos-stat-top">Products in stock</div>
+                  <strong>{user ? products.length : "—"}</strong>
+                  <p>Sign in and open Inventory to load products</p>
+                </article>
+                <article className="pos-stat-card">
+                  <div className="pos-stat-top">Units available</div>
+                  <strong>
+                    {products.reduce((sum, item) => sum + item.quantity, 0)}
+                  </strong>
+                  <p>Total units in your inventory</p>
+                </article>
+                <article className="pos-stat-card">
+                  <div className="pos-stat-top">Low-stock products</div>
+                  <strong>
+                    {
+                      products.filter(
+                        (item) =>
+                          item.quantity <= item.low_stock_threshold
+                      ).length
+                    }
+                  </strong>
+                  <p>Products at or below their alert level</p>
+                </article>
+                <article className="pos-stat-card">
+                  <div className="pos-stat-top">Current cart</div>
+                  <strong>{cartCount}</strong>
+                  <p>Items in your unfinished sale</p>
+                </article>
+              </div>
+
+              <div className="pos-section-heading">
+                <div>
+                  <h2>Business tools</h2>
+                  <p>Choose a module to get started</p>
+                </div>
+              </div>
+
+              <div className="pos-tools-grid">
+                {sections.slice(1).map((item) => (
+                  <button
+                    key={item.name}
+                    className="pos-tool-card"
+                    onClick={() => setSection(item.name)}
+                  >
+                    <span className="pos-tool-icon">{item.icon}</span>
+                    <span className="pos-tool-text">
+                      <strong>{item.name}</strong>
+                      <span>
+                        {item.name === "New Sale"
+                          ? "Sell products and print receipts"
+                          : item.name === "Inventory"
+                            ? "Manage products and stock"
+                            : "Business module"}
+                      </span>
+                    </span>
+                    <span className="pos-tool-arrow">→</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {section === "Inventory" && (
             <>
               <div className="pos-welcome-row">
                 <div>
                   <p className="pos-eyebrow">PRODUCT MANAGEMENT</p>
                   <h1>Inventory</h1>
                   <p className="pos-description">
-                    Add products, edit details, and manage stock.
+                    Add products and keep track of your stock.
                   </p>
                 </div>
                 <div className="pos-date-chip">
@@ -408,9 +476,9 @@ export default function Home() {
                 </div>
               </div>
 
-              {!user && (
+              {!user ? (
                 <div className="pos-next-step">
-                  Please sign in to manage your inventory.
+                  Please sign in to manage inventory.
                   <button
                     className="pos-primary-button"
                     onClick={handleAuth}
@@ -418,68 +486,17 @@ export default function Home() {
                     Sign in
                   </button>
                 </div>
-              )}
-
-              {user && (
+              ) : (
                 <>
-                  <div className="pos-stats-grid">
-                    <article className="pos-stat-card">
-                      <div className="pos-stat-top">Total products</div>
-                      <strong>{products.length}</strong>
-                      <p>Registered products</p>
-                    </article>
-
-                    <article className="pos-stat-card">
-                      <div className="pos-stat-top">Units in stock</div>
-                      <strong>
-                        {products.reduce(
-                          (sum, p) => sum + p.quantity,
-                          0
-                        )}
-                      </strong>
-                      <p>Across all products</p>
-                    </article>
-
-                    <article className="pos-stat-card">
-                      <div className="pos-stat-top">Low stock</div>
-                      <strong>
-                        {
-                          products.filter(
-                            (p) =>
-                              p.quantity <= p.low_stock_threshold
-                          ).length
-                        }
-                      </strong>
-                      <p>Products needing attention</p>
-                    </article>
-
-                    <article className="pos-stat-card">
-                      <div className="pos-stat-top">Stock value</div>
-                      <strong>
-                        {money(
-                          products.reduce(
-                            (sum, p) =>
-                              sum +
-                              Number(p.selling_price) * p.quantity,
-                            0
-                          )
-                        )}
-                      </strong>
-                      <p>At selling prices</p>
-                    </article>
-                  </div>
-
                   <div className="pos-inventory-layout">
                     <section className="pos-inventory-form">
                       <h2>Add a product</h2>
                       <p className="pos-description">
-                        Enter product details and opening stock.
+                        Enter the product and opening stock.
                       </p>
 
                       <form onSubmit={addProduct}>
-                        <label htmlFor="product-name">
-                          Product name *
-                        </label>
+                        <label htmlFor="product-name">Product name *</label>
                         <input
                           id="product-name"
                           value={name}
@@ -488,9 +505,7 @@ export default function Home() {
                           required
                         />
 
-                        <label htmlFor="product-sku">
-                          SKU / Product code
-                        </label>
+                        <label htmlFor="product-sku">SKU / Product code</label>
                         <input
                           id="product-sku"
                           value={sku}
@@ -520,9 +535,7 @@ export default function Home() {
                           min="0"
                           step="1"
                           value={quantity}
-                          onChange={(e) =>
-                            setQuantity(e.target.value)
-                          }
+                          onChange={(e) => setQuantity(e.target.value)}
                           required
                         />
 
@@ -535,9 +548,7 @@ export default function Home() {
                           min="0"
                           step="1"
                           value={threshold}
-                          onChange={(e) =>
-                            setThreshold(e.target.value)
-                          }
+                          onChange={(e) => setThreshold(e.target.value)}
                           required
                         />
 
@@ -555,7 +566,7 @@ export default function Home() {
                       <div className="pos-section-heading">
                         <div>
                           <h2>Product list</h2>
-                          <p>Search and manage saved inventory</p>
+                          <p>Search your saved inventory</p>
                         </div>
                         <button
                           className="pos-auth-button"
@@ -566,56 +577,19 @@ export default function Home() {
                         </button>
                       </div>
 
-                      {error && (
-                        <div className="pos-message pos-error">
-                          {error}
-                        </div>
-                      )}
-
-                      {notice && (
-                        <div className="pos-message pos-success">
-                          {notice}
-                        </div>
-                      )}
-
-                      <div className="pos-inventory-controls">
-                        <input
-                          className="pos-search-input"
-                          aria-label="Search products"
-                          placeholder="Search name or SKU..."
-                          value={searchTerm}
-                          onChange={(e) =>
-                            setSearchTerm(e.target.value)
-                          }
-                        />
-
-                        <select
-                          className="pos-filter-select"
-                          aria-label="Filter stock"
-                          value={stockFilter}
-                          onChange={(e) =>
-                            setStockFilter(e.target.value)
-                          }
-                        >
-                          <option value="all">All products</option>
-                          <option value="low">Low stock</option>
-                          <option value="available">
-                            Above low-stock level
-                          </option>
-                        </select>
-                      </div>
+                      <input
+                        className="pos-search-input"
+                        placeholder="Search name or SKU..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        aria-label="Search inventory"
+                      />
 
                       {loading ? (
-                        <p className="pos-empty">
-                          Loading products...
-                        </p>
-                      ) : products.length === 0 ? (
-                        <p className="pos-empty">
-                          No products yet. Add your first product.
-                        </p>
+                        <p className="pos-empty">Loading products...</p>
                       ) : filteredProducts.length === 0 ? (
                         <p className="pos-empty">
-                          No products match your search or filter.
+                          No matching products found.
                         </p>
                       ) : (
                         <div className="pos-product-list">
@@ -624,18 +598,15 @@ export default function Home() {
                               className="pos-product-row"
                               key={product.id}
                             >
-                              <div className="pos-product-symbol">
-                                ▤
-                              </div>
-
+                              <div className="pos-product-symbol">▤</div>
                               <div className="pos-product-info">
                                 <strong>{product.name}</strong>
-
                                 <span>
-                                  {product.sku || "No product code"} ·{" "}
+                                  {product.sku || "No product code"}
+                                </span>
+                                <span>
                                   {money(Number(product.selling_price))}
                                 </span>
-
                                 <span
                                   className={
                                     product.quantity <=
@@ -646,78 +617,10 @@ export default function Home() {
                                 >
                                   {product.quantity} in stock
                                   {product.quantity <=
-                                    product.low_stock_threshold
+                                  product.low_stock_threshold
                                     ? " · Low stock"
                                     : ""}
                                 </span>
-
-                                <div className="pos-stock-adjust">
-                                  <label
-                                    htmlFor={`stock-${product.id}`}
-                                  >
-                                    Adjust by
-                                  </label>
-
-                                  <input
-                                    id={`stock-${product.id}`}
-                                    type="number"
-                                    min="1"
-                                    step="1"
-                                    value={
-                                      stockChange[product.id] ?? "1"
-                                    }
-                                    onChange={(e) =>
-                                      setStockChange((current) => ({
-                                        ...current,
-                                        [product.id]: e.target.value,
-                                      }))
-                                    }
-                                  />
-
-                                  <button
-                                    type="button"
-                                    className="pos-stock-button"
-                                    disabled={saving}
-                                    onClick={() =>
-                                      adjustStock(product, -1)
-                                    }
-                                  >
-                                    − Remove
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    className="pos-stock-button"
-                                    disabled={saving}
-                                    onClick={() =>
-                                      adjustStock(product, 1)
-                                    }
-                                  >
-                                    + Add
-                                  </button>
-                                </div>
-
-                                <div className="pos-product-actions">
-                                  <button
-                                    type="button"
-                                    className="pos-edit-button"
-                                    onClick={() =>
-                                      startEditing(product)
-                                    }
-                                  >
-                                    Edit details
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    className="pos-delete-button"
-                                    onClick={() =>
-                                      deleteProduct(product)
-                                    }
-                                  >
-                                    Delete
-                                  </button>
-                                </div>
                               </div>
                             </article>
                           ))}
@@ -725,224 +628,267 @@ export default function Home() {
                       )}
                     </section>
                   </div>
-
-                  {editingProduct && (
-                    <section className="pos-edit-panel">
-                      <div className="pos-section-heading">
-                        <div>
-                          <h2>Edit product</h2>
-                          <p>
-                            Updating {editingProduct.name}
-                          </p>
-                        </div>
-
-                        <button
-                          type="button"
-                          className="pos-auth-button"
-                          onClick={() => setEditingProduct(null)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-
-                      <form
-                        className="pos-edit-grid"
-                        onSubmit={saveProductChanges}
-                      >
-                        <div>
-                          <label htmlFor="edit-name">
-                            Product name *
-                          </label>
-                          <input
-                            id="edit-name"
-                            value={editName}
-                            onChange={(e) =>
-                              setEditName(e.target.value)
-                            }
-                            required
-                          />
-                        </div>
-
-                        <div>
-                          <label htmlFor="edit-sku">
-                            SKU / Product code
-                          </label>
-                          <input
-                            id="edit-sku"
-                            value={editSku}
-                            onChange={(e) =>
-                              setEditSku(e.target.value)
-                            }
-                          />
-                        </div>
-
-                        <div>
-                          <label htmlFor="edit-price">
-                            Selling price (KSh) *
-                          </label>
-                          <input
-                            id="edit-price"
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={editPrice}
-                            onChange={(e) =>
-                              setEditPrice(e.target.value)
-                            }
-                            required
-                          />
-                        </div>
-
-                        <div>
-                          <label htmlFor="edit-quantity">
-                            Current quantity *
-                          </label>
-                          <input
-                            id="edit-quantity"
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={editQuantity}
-                            onChange={(e) =>
-                              setEditQuantity(e.target.value)
-                            }
-                            required
-                          />
-                        </div>
-
-                        <div>
-                          <label htmlFor="edit-threshold">
-                            Low-stock alert at
-                          </label>
-                          <input
-                            id="edit-threshold"
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={editThreshold}
-                            onChange={(e) =>
-                              setEditThreshold(e.target.value)
-                            }
-                            required
-                          />
-                        </div>
-
-                        <button
-                          className="pos-primary-button pos-submit"
-                          type="submit"
-                          disabled={saving}
-                        >
-                          {saving ? "Saving..." : "Save changes"}
-                        </button>
-                      </form>
-                    </section>
-                  )}
                 </>
               )}
             </>
-          ) : section === "Dashboard" ? (
+          )}
+
+          {section === "New Sale" && (
             <>
               <div className="pos-welcome-row">
                 <div>
-                  <p className="pos-eyebrow">
-                    YOUR BUSINESS WORKSPACE
-                  </p>
-                  <h1>Business overview</h1>
+                  <p className="pos-eyebrow">POINT OF SALE</p>
+                  <h1>New sale</h1>
                   <p className="pos-description">
-                    Manage your business from one simple dashboard.
+                    Add products, choose payment, and complete checkout.
                   </p>
                 </div>
-
                 <div className="pos-date-chip">
-                  <span className="pos-status-dot" />
-                  POS workspace
+                  {products.length} products
                 </div>
               </div>
 
-              <div className="pos-summary-banner">
-                <div>
-                  <span className="pos-banner-label">
-                    RICKY POS · OVERVIEW
-                  </span>
-                  <h2>Run your business with clarity.</h2>
-                  <p>
-                    Track sales, manage stock, and organise your daily
-                    operations in one place.
-                  </p>
-                </div>
-                <div className="pos-banner-symbol">R</div>
-              </div>
-
-              <div className="pos-section-heading">
-                <div>
-                  <h2>Today at a glance</h2>
-                  <p>Your sales and stock summary</p>
-                </div>
-              </div>
-
-              <div className="pos-stats-grid">
-                {[
-                  ["Today's sales", "KSh 0.00"],
-                  ["Transactions", "0"],
-                  ["Items sold", "0"],
-                  ["Stock products", "—"],
-                ].map(([label, value]) => (
-                  <article className="pos-stat-card" key={label}>
-                    <div className="pos-stat-top">{label}</div>
-                    <strong>{value}</strong>
-                    <p>Sales reporting will be connected next</p>
-                  </article>
-                ))}
-              </div>
-
-              <div className="pos-section-heading">
-                <div>
-                  <h2>Business tools</h2>
-                  <p>Choose what you want to work on</p>
-                </div>
-              </div>
-
-              <div className="pos-tools-grid">
-                {sections.slice(1).map((item) => (
+              {!user ? (
+                <div className="pos-next-step">
+                  Please sign in before making a sale.
                   <button
-                    key={item.name}
-                    className="pos-tool-card"
-                    onClick={() => setSection(item.name)}
+                    className="pos-primary-button"
+                    onClick={handleAuth}
                   >
-                    <span className="pos-tool-icon">
-                      {item.icon}
-                    </span>
-                    <span className="pos-tool-text">
-                      <strong>{item.name}</strong>
-                      <span>
-                        {item.name === "Inventory"
-                          ? "Manage products and stock"
-                          : "Open this business module"}
-                      </span>
-                    </span>
-                    <span className="pos-tool-arrow">→</span>
+                    Sign in
                   </button>
-                ))}
-              </div>
+                </div>
+              ) : (
+                <>
+                  {lastReceipt && (
+                    <section className="pos-edit-panel">
+                      <div className="pos-section-heading">
+                        <div>
+                          <p className="pos-eyebrow">SALE COMPLETED</p>
+                          <h2>Receipt</h2>
+                          <p>{lastReceipt.receipt_number}</p>
+                          <p>
+                            {new Date(
+                              lastReceipt.created_at
+                            ).toLocaleString("en-KE")}
+                          </p>
+                        </div>
+                        <button
+                          className="pos-auth-button"
+                          onClick={() => window.print()}
+                        >
+                          Print receipt
+                        </button>
+                      </div>
+
+                      {lastReceipt.items.map((item, index) => (
+                        <div className="pos-product-row" key={index}>
+                          <div className="pos-product-info">
+                            <strong>
+                              {item.product_name} × {item.quantity}
+                            </strong>
+                            <span>{money(item.unit_price)} each</span>
+                          </div>
+                          <strong>{money(item.line_total)}</strong>
+                        </div>
+                      ))}
+
+                      <div className="pos-section-heading">
+                        <h2>Total paid</h2>
+                        <h2>{money(lastReceipt.total)}</h2>
+                      </div>
+                      <p className="pos-description">
+                        Payment method: {lastReceipt.payment_method.toUpperCase()}
+                      </p>
+                    </section>
+                  )}
+
+                  <div className="pos-inventory-layout">
+                    <section className="pos-inventory-list">
+                      <div className="pos-section-heading">
+                        <div>
+                          <h2>Available products</h2>
+                          <p>Products with stock can be added to your sale.</p>
+                        </div>
+                        <button
+                          className="pos-auth-button"
+                          onClick={loadProducts}
+                          disabled={loading}
+                        >
+                          {loading ? "Loading..." : "Refresh"}
+                        </button>
+                      </div>
+
+                      <input
+                        className="pos-search-input"
+                        placeholder="Search products..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        aria-label="Search sale products"
+                      />
+
+                      {loading ? (
+                        <p className="pos-empty">Loading products...</p>
+                      ) : (
+                        <div className="pos-product-list">
+                          {filteredProducts
+                            .filter((product) => product.quantity > 0)
+                            .map((product) => (
+                              <article
+                                className="pos-product-row"
+                                key={product.id}
+                              >
+                                <div className="pos-product-symbol">▤</div>
+                                <div className="pos-product-info">
+                                  <strong>{product.name}</strong>
+                                  <span>
+                                    {product.quantity} in stock
+                                  </span>
+                                  <span>
+                                    {money(Number(product.selling_price))}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="pos-primary-button"
+                                    disabled={
+                                      (cart[product.id] ?? 0) >=
+                                      product.quantity
+                                    }
+                                    onClick={() =>
+                                      changeCart(product.id, 1)
+                                    }
+                                  >
+                                    Add to cart
+                                  </button>
+                                </div>
+                              </article>
+                            ))}
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="pos-inventory-form">
+                      <h2>Current sale</h2>
+                      <p className="pos-description">
+                        {cartCount} item(s) in cart
+                      </p>
+
+                      {Object.keys(cart).length === 0 ? (
+                        <p className="pos-empty">
+                          Your cart is empty. Add products to begin.
+                        </p>
+                      ) : (
+                        <div className="pos-cart-items">
+                          {Object.entries(cart).map(([productId, qty]) => {
+                            const product = products.find(
+                              (item) => item.id === productId
+                            );
+                            if (!product) return null;
+
+                            return (
+                              <div className="pos-cart-row" key={productId}>
+                                <div className="pos-product-info">
+                                  <strong>{product.name}</strong>
+                                  <span>
+                                    {money(Number(product.selling_price))} each
+                                  </span>
+                                </div>
+                                <div className="pos-quantity-controls">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      changeCart(productId, -1)
+                                    }
+                                    aria-label={`Remove one ${product.name}`}
+                                  >
+                                    −
+                                  </button>
+                                  <strong>{qty}</strong>
+                                  <button
+                                    type="button"
+                                    disabled={qty >= product.quantity}
+                                    onClick={() =>
+                                      changeCart(productId, 1)
+                                    }
+                                    aria-label={`Add one ${product.name}`}
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                                <strong>
+                                  {money(
+                                    Number(product.selling_price) * qty
+                                  )}
+                                </strong>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      <div className="pos-section-heading">
+                        <strong>Sale total</strong>
+                        <strong>{money(cartTotal)}</strong>
+                      </div>
+
+                      <label htmlFor="payment-method">
+                        Payment method
+                      </label>
+                      <select
+                        id="payment-method"
+                        className="pos-filter-select"
+                        value={paymentMethod}
+                        onChange={(e) =>
+                          setPaymentMethod(e.target.value)
+                        }
+                      >
+                        <option value="cash">Cash</option>
+                        <option value="mpesa">M-Pesa</option>
+                        <option value="card">Card</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        className="pos-primary-button pos-submit"
+                        onClick={completeSale}
+                        disabled={
+                          checkoutBusy || Object.keys(cart).length === 0
+                        }
+                      >
+                        {checkoutBusy
+                          ? "Processing..."
+                          : "Complete sale"}
+                      </button>
+
+                      <p className="pos-description">
+                        Stock is deducted only after checkout succeeds.
+                      </p>
+                    </section>
+                  </div>
+                </>
+              )}
             </>
-          ) : (
-            <div className="pos-module-panel">
-              <div className="pos-module-icon">
-                {sections.find((item) => item.name === section)?.icon}
-              </div>
-              <h2>{section}</h2>
-              <p>
-                This module is awaiting its implementation. Your
-                inventory is available now.
-              </p>
-              <button
-                className="pos-primary-button"
-                onClick={() => setSection("Dashboard")}
-              >
-                Back to dashboard
-              </button>
-            </div>
           )}
+
+          {section !== "Dashboard" &&
+            section !== "Inventory" &&
+            section !== "New Sale" && (
+              <div className="pos-module-panel">
+                <div className="pos-module-icon">
+                  {sections.find((item) => item.name === section)?.icon}
+                </div>
+                <h2>{section}</h2>
+                <p>
+                  This module will be connected in a future Ricky POS step.
+                </p>
+                <button
+                  className="pos-primary-button"
+                  onClick={() => setSection("Dashboard")}
+                >
+                  Back to dashboard
+                </button>
+              </div>
+            )}
 
           <footer className="pos-footer">
             <span>© {new Date().getFullYear()} Ricky POS</span>
